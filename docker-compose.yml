@@ -1,0 +1,156 @@
+version: '3.8'
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: collider-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - collider-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: collider-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks:
+      - collider-network
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: collider-postgres
+    environment:
+      POSTGRES_DB: collider_db
+      POSTGRES_USER: physics
+      POSTGRES_PASSWORD: quantum2024
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+    networks:
+      - collider-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U physics"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: collider-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - collider-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  collision-service:
+    build:
+      context: ./collision_service
+      dockerfile: Dockerfile
+    container_name: collider-collision-service
+    depends_on:
+      kafka:
+        condition: service_started
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      LOG_LEVEL: INFO
+    networks:
+      - collider-network
+    volumes:
+      - ./collision_service:/app
+
+  analysis-service:
+    build:
+      context: ./analysis_service
+      dockerfile: Dockerfile
+    container_name: collider-analysis-service
+    depends_on:
+      kafka:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: collider_db
+      POSTGRES_USER: physics
+      POSTGRES_PASSWORD: quantum2024
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      LOG_LEVEL: INFO
+    networks:
+      - collider-network
+    volumes:
+      - ./analysis_service:/app
+
+  api-gateway:
+    build:
+      context: ./api_gateway
+      dockerfile: Dockerfile
+    container_name: collider-api-gateway
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    ports:
+      - "8000:8000"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: collider_db
+      POSTGRES_USER: physics
+      POSTGRES_PASSWORD: quantum2024
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      LOG_LEVEL: INFO
+    networks:
+      - collider-network
+    volumes:
+      - ./api_gateway:/app
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: collider-frontend
+    depends_on:
+      - api-gateway
+    ports:
+      - "8080:80"
+    networks:
+      - collider-network
+    volumes:
+      - ./frontend:/app
+
+networks:
+  collider-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
